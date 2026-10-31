@@ -3,7 +3,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Welcome to ShopEasy v1"
+    return "Welcome to ShopEasy v2"
 
 @app.route("/health")
 def health():
