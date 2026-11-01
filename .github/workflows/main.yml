@@ -25,7 +25,7 @@ jobs:
           python - <<'PY'
           import zipfile
           with zipfile.ZipFile("storefront-source.zip") as archive:
-              for name in ("app.py", "test_app.py", "static/index.html"):
+              for name in ("app.py", "test_app.py"):
                   archive.extract(name, ".")
           PY
       - name: Install dependencies
