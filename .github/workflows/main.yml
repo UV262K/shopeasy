@@ -1,17 +1,19 @@
 name: CI-CD
+
 on:
   push:
     branches: [main]
   pull_request:
 
 env:
-  AWS_REGION: ap-south-1
+  AWS_REGION: ap-southeast-2
   ECR_REPO: shopeasy
-  ECS_CLUSTER: shopeasy-cluster
-  ECS_SERVICE: shopeasy-service
+  CLUSTER: shopeasy-cluster
+  SERVICE: shopeasy-service
 
 jobs:
   test-and-build:
+    name: CI - test and build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,8 +28,9 @@ jobs:
         run: docker build -t shopeasy:${{ github.sha }} .
 
   deploy:
+    name: CD - push to ECR and deploy to ECS
     needs: test-and-build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +39,39 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      - id: ecr
+      - name: Login to ECR
+        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
-      - name: Build and push image
+      - name: Build and push image (tag = commit SHA)
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
         run: |
-          IMAGE=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:latest
-          docker build -t $IMAGE .
-          docker push $IMAGE
-      - name: Redeploy ECS service
+          docker build -t $REGISTRY/$ECR_REPO:$TAG .
+          docker push $REGISTRY/$ECR_REPO:$TAG
+      - name: Register new task definition revision
+        id: taskdef
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
         run: |
-          aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} \
-            --service ${{ env.ECS_SERVICE }} --force-new-deployment
+          aws ecs describe-task-definition --task-definition shopeasy-task \
+            --query taskDefinition > td.json
+          jq --arg IMG "$REGISTRY/$ECR_REPO:$TAG" \
+            '.containerDefinitions[0].image=$IMG
+             | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)' \
+            td.json > td-new.json
+          ARN=$(aws ecs register-task-definition --cli-input-json file://td-new.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "arn=$ARN" >> $GITHUB_OUTPUT
+      - name: Deploy to ECS and wait for stability
+        run: |
+          aws ecs update-service --cluster $CLUSTER --service $SERVICE \
+            --task-definition ${{ steps.taskdef.outputs.arn }} >/dev/null
+          aws ecs wait services-stable --cluster $CLUSTER --services $SERVICE
+      - name: Verify running application
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name shopeasy \
+            --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" --output text)
+          curl -sf $URL/health
+          curl -sf $URL/

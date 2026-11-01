@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ShopEasy - VPC, ALB, ECR, ECS Fargate (autoscaling), CloudWatch alarms, CloudTrail audit
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: shopeasy
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag in ECR to deploy
+  DesiredCount:
+    Type: Number
+    Default: 2
+  AlertEmail:
+    Type: String
+    Description: Email for CloudWatch alarm notifications
+
+Resources:
+  # ---------------- Network (virtual data center) ----------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${ProjectName}-vpc'}]
+
+  IGW:
+    Type: AWS::EC2::InternetGateway
+  IGWAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: {VpcId: !Ref VPC, InternetGatewayId: !Ref IGW}
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref VPC}
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttach
+    Properties:
+      RouteTableId: !Ref PublicRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+  RTAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRT}
+  RTAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRT}
+
+  # ---------------- Security groups (hardening) ----------------
+  AlbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from internet to ALB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+  TaskSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic to tasks only from the ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 5000, ToPort: 5000, SourceSecurityGroupId: !Ref AlbSG}
+
+  # ---------------- Container registry ----------------
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ProjectName
+      ImageScanningConfiguration: {ScanOnPush: true}
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep last 10","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
+
+  # ---------------- Logging ----------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}'
+      RetentionInDays: 7
+
+  # ---------------- IAM (least privilege) ----------------
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+
+  # ---------------- ECS Fargate ----------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      ClusterSettings: [{Name: containerInsights, Value: enabled}]
+
+  TaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-task'
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref ProjectName
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}:${ImageTag}'
+          Essential: true
+          PortMappings: [{ContainerPort: 5000}]
+          ReadonlyRootFilesystem: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref AlbSG]
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions: [{Type: forward, TargetGroupArn: !Ref TargetGroup}]
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: !Sub '${ProjectName}-service'
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDef
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: {Enable: true, Rollback: true}
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+          SecurityGroups: [!Ref TaskSG]
+      LoadBalancers:
+        - {ContainerName: !Ref ProjectName, ContainerPort: 5000, TargetGroupArn: !Ref TargetGroup}
+
+  # ---------------- Autoscaling ----------------
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref DesiredCount
+      MaxCapacity: 4
+      ResourceId: !Sub 'service/${Cluster}/${Service.Name}'
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  # ---------------- Monitoring & alerts ----------------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription: [{Protocol: email, Endpoint: !Ref AlertEmail}]
+  HighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-high-cpu'
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - {Name: ClusterName, Value: !Ref Cluster}
+        - {Name: ServiceName, Value: !GetAtt Service.Name}
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions: [!Ref AlarmTopic]
+  Unhealthy5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-alb-5xx'
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions: [{Name: LoadBalancer, Value: !GetAtt ALB.LoadBalancerFullName}]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-dashboard'
+      DashboardBody: !Sub |
+        {"widgets":[
+          {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"ECS CPU / Memory","region":"${AWS::Region}","stat":"Average","period":60,"metrics":[["AWS/ECS","CPUUtilization","ClusterName","${Cluster}","ServiceName","${ProjectName}-service"],["AWS/ECS","MemoryUtilization","ClusterName","${Cluster}","ServiceName","${ProjectName}-service"]]}},
+          {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"ALB Requests","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","${ALB.LoadBalancerFullName}"]]}}
+        ]}
+
+  # ---------------- Auditing (CloudTrail) ----------------
+  TrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+  TrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AclCheck
+            Effect: Allow
+            Principal: {Service: cloudtrail.amazonaws.com}
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt TrailBucket.Arn
+          - Sid: Write
+            Effect: Allow
+            Principal: {Service: cloudtrail.amazonaws.com}
+            Action: s3:PutObject
+            Resource: !Sub '${TrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals: {'s3:x-amz-acl': 'bucket-owner-full-control'}
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: TrailBucketPolicy
+    Properties:
+      TrailName: !Sub '${ProjectName}-audit-trail'
+      S3BucketName: !Ref TrailBucket
+      IsLogging: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+
+Outputs:
+  AppUrl:
+    Value: !Sub 'http://${ALB.DNSName}'
+  EcrUri:
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}'
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
