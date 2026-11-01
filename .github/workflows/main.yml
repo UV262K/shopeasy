@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  AWS_REGION: ap-southeast-2
+  AWS_REGION: ap-south-1
   ECR_REPO: shopeasy
   CLUSTER: shopeasy-cluster
   SERVICE: shopeasy-service
@@ -20,10 +20,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Extract storefront source
+        run: |
+          python - <<'PY'
+          import zipfile
+          with zipfile.ZipFile("storefront-source.zip") as archive:
+              for name in ("app.py", "test_app.py", "static/index.html"):
+                  archive.extract(name, ".")
+          PY
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run tests
-        run: pytest
+        run: pytest -q
       - name: Build Docker image
         run: docker build -t shopeasy:${{ github.sha }} .
 
