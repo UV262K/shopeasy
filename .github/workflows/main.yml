@@ -25,7 +25,7 @@ jobs:
       - name: Sync Lambda source into CloudFormation
         run: python scripts/sync_lambda.py
       - name: Lint CloudFormation template
-        run: cfn-lint -i W infra/network-ecs.yaml
+        run: cfn-lint -i W -t infra/network-ecs.yaml
       - name: Run tests
         run: pytest
       - name: Build Docker image
