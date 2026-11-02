@@ -117,6 +117,20 @@ Resources:
           - Effect: Allow
             Principal: {Service: ecs-tasks.amazonaws.com}
             Action: sts:AssumeRole
+      Policies:
+        - PolicyName: shopeasy-data-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:Scan]
+                Resource: !GetAtt ProductsTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem]
+                Resource: !GetAtt OrdersTable.Arn
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${DataBucket.Arn}/images/*'
 
   # ---------------- ECS Fargate ----------------
   Cluster:
@@ -140,6 +154,11 @@ Resources:
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}:${ImageTag}'
           Essential: true
           PortMappings: [{ContainerPort: 5000}]
+          Environment:
+            - {Name: PRODUCTS_TABLE, Value: !Ref ProductsTable}
+            - {Name: ORDERS_TABLE, Value: !Ref OrdersTable}
+            - {Name: DATA_BUCKET, Value: !Ref DataBucket}
+            - {Name: AWS_REGION, Value: !Ref 'AWS::Region'}
           ReadonlyRootFilesystem: false
           LogConfiguration:
             LogDriver: awslogs
@@ -254,8 +273,161 @@ Resources:
       DashboardBody: !Sub |
         {"widgets":[
           {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"ECS CPU / Memory","region":"${AWS::Region}","stat":"Average","period":60,"metrics":[["AWS/ECS","CPUUtilization","ClusterName","${Cluster}","ServiceName","${ProjectName}-service"],["AWS/ECS","MemoryUtilization","ClusterName","${Cluster}","ServiceName","${ProjectName}-service"]]}},
-          {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"ALB Requests","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","${ALB.LoadBalancerFullName}"]]}}
+          {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"ALB Requests","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","${ALB.LoadBalancerFullName}"]]}},
+          {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Orders placed","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["ShopEasy","OrdersPlaced"]]}},
+          {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"Order Lambda errors","region":"${AWS::Region}","stat":"Sum","period":60,"metrics":[["AWS/Lambda","Errors","FunctionName","${OrderProcessor}"]]}}]}}
         ]}
+
+
+  # ---------------- Data layer: DynamoDB + S3 ----------------
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: product_id, AttributeType: S}]
+      KeySchema: [{AttributeName: product_id, KeyType: HASH}]
+      SSESpecification: {SSEEnabled: true}
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: order_id, AttributeType: S}]
+      KeySchema: [{AttributeName: order_id, KeyType: HASH}]
+      SSESpecification: {SSEEnabled: true}
+      StreamSpecification: {StreamViewType: NEW_IMAGE}
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+
+  # ---------------- Serverless order processor ----------------
+  OrderProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-order-processor'
+      RetentionInDays: 7
+  OrderProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: shopeasy-order-processor
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${OrderProcessorLogGroup.Arn}:*'
+              - Effect: Allow
+                Action: [dynamodb:DescribeStream, dynamodb:GetRecords, dynamodb:GetShardIterator]
+                Resource: !GetAtt OrdersTable.StreamArn
+              - Effect: Allow
+                Action: dynamodb:ListStreams
+                Resource: '*'
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${DataBucket.Arn}/receipts/*'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlarmTopic
+  OrderProcessor:
+    Type: AWS::Lambda::Function
+    DependsOn: OrderProcessorLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-order-processor'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt OrderProcessorRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          BUCKET: !Ref DataBucket
+          TOPIC: !Ref AlarmTopic
+      Code:
+        ZipFile: |
+          import json, os, time
+          import boto3
+          from boto3.dynamodb.types import TypeDeserializer
+
+          s3 = boto3.client("s3")
+          sns = boto3.client("sns")
+          deser = TypeDeserializer()
+
+          def handler(event, context):
+              processed = 0
+              for rec in event.get("Records", []):
+                  if rec.get("eventName") != "INSERT":
+                      continue
+                  order = {k: deser.deserialize(v) for k, v in rec["dynamodb"]["NewImage"].items()}
+                  order_id = order["order_id"]
+                  s3.put_object(
+                      Bucket=os.environ["BUCKET"],
+                      Key=f"receipts/{order_id}.json",
+                      Body=json.dumps(order, default=int, indent=2),
+                      ContentType="application/json",
+                      ServerSideEncryption="AES256",
+                  )
+                  sns.publish(
+                      TopicArn=os.environ["TOPIC"],
+                      Subject=f"ShopEasy order {order_id[:8]}",
+                      Message=f"Order {order_id} placed. Total: INR {order['total_inr']}.",
+                  )
+                  print(json.dumps({
+                      "_aws": {
+                          "Timestamp": int(time.time() * 1000),
+                          "CloudWatchMetrics": [{
+                              "Namespace": "ShopEasy",
+                              "Dimensions": [[]],
+                              "Metrics": [{"Name": "OrdersPlaced", "Unit": "Count"},
+                                          {"Name": "OrderValueINR", "Unit": "None"}],
+                          }],
+                      },
+                      "OrdersPlaced": 1,
+                      "OrderValueINR": int(order["total_inr"]),
+                      "order_id": order_id,
+                  }))
+                  processed += 1
+              return {"processed": processed}
+  OrderStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref OrderProcessor
+      EventSourceArn: !GetAtt OrdersTable.StreamArn
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumRetryAttempts: 2
+      BisectBatchOnFunctionError: true
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["INSERT"]}'
+
+  OrderProcessorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-order-lambda-errors'
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{Name: FunctionName, Value: !Ref OrderProcessor}]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
 
   # ---------------- Auditing (CloudTrail) ----------------
   TrailBucket:
@@ -307,3 +479,11 @@ Outputs:
     Value: !Ref Cluster
   ServiceName:
     Value: !GetAtt Service.Name
+  ProductsTableName:
+    Value: !Ref ProductsTable
+  OrdersTableName:
+    Value: !Ref OrdersTable
+  DataBucketName:
+    Value: !Ref DataBucket
+  OrderProcessorName:
+    Value: !Ref OrderProcessor
