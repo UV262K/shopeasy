@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101114">
+<title>ShopEasy — Everyday tech, made easy</title>
+<style>
+  :root{--bg:#101114;--card:#1a1c22;--line:#2a2d36;--text:#f2f3f5;--muted:#9aa0ac;--accent:#ffd166;--ok:#2ecc71;--bad:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .banner{background:var(--accent);color:#1a1a1a;text-align:center;font-size:13px;font-weight:600;padding:6px 12px;letter-spacing:.04em}
+  header{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+  .logo{font-weight:800;font-size:22px}.logo span{color:var(--accent)}
+  button{font:inherit;cursor:pointer}
+  .bag-btn{background:transparent;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:8px 16px}
+  .hero{padding:56px 24px 24px;max-width:1100px;margin:auto}
+  .hero h1{font-size:clamp(32px,6vw,56px);line-height:1.05;margin:0 0 12px}.hero h1 em{color:var(--accent);font-style:italic}
+  .hero p{color:var(--muted);max-width:520px;margin:0}
+  .wrap{max-width:1100px;margin:auto;padding:0 24px 64px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0}
+  .chip{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:6px 14px}
+  .chip.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+  .pic{aspect-ratio:4/3;background:#222;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:40px;color:rgba(255,255,255,.85)}
+  .pic img{width:100%;height:100%;object-fit:cover;display:block}
+  .info{padding:14px;display:flex;flex-direction:column;gap:6px;flex:1}
+  .cat{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .name{font-weight:700}.desc{font-size:14px;color:var(--muted);flex:1}
+  .row{display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+  .price{font-weight:800}
+  .add{background:var(--accent);color:#1a1a1a;border:0;border-radius:8px;padding:7px 12px;font-weight:700}
+  .status{color:var(--muted);padding:32px 0;text-align:center}
+  aside{position:fixed;top:0;right:0;height:100%;width:min(380px,100%);background:var(--card);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .25s;z-index:10;display:flex;flex-direction:column}
+  aside.open{transform:none}
+  aside h2{margin:0;padding:18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}
+  #lines{flex:1;overflow:auto;padding:12px 18px}
+  .line{display:flex;justify-content:space-between;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);font-size:14px}
+  .qty button{background:var(--line);color:var(--text);border:0;border-radius:6px;width:26px;height:26px}
+  .foot{padding:18px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+  .foot input{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px}
+  .tot{display:flex;justify-content:space-between;font-size:14px;color:var(--muted)}.tot.big{color:var(--text);font-weight:800;font-size:18px}
+  .go{background:var(--ok);color:#06210f;border:0;border-radius:10px;padding:12px;font-weight:800}
+  .go:disabled{opacity:.5;cursor:not-allowed}
+  .msg{font-size:14px;min-height:20px}.msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}
+  footer{border-top:1px solid var(--line);color:var(--muted);text-align:center;padding:24px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="banner">GOOD TECH. GOOD PRICES. NO DRAMA. &nbsp;✦&nbsp; FREE SHIPPING ON ORDERS ₹4,000+</div>
+<header>
+  <div class="logo">shopeasy<span>.</span></div>
+  <button class="bag-btn" id="bagBtn">Bag <span id="count">0</span></button>
+</header>
+<section class="hero">
+  <h1>Little things. <em>Big difference.</em></h1>
+  <p>Thoughtful tech, everyday essentials, and finds that just make life better. All in one easy place.</p>
+</section>
+<main class="wrap">
+  <div class="chips" id="chips"></div>
+  <div class="grid" id="grid"></div>
+  <div class="status" id="status">Loading the good stuff…</div>
+</main>
+<footer>shopeasy. Everyday tech, made easy. · Demo storefront · {{ version }}</footer>
+<aside id="drawer" aria-label="Shopping bag">
+  <h2>Your bag <button class="bag-btn" id="closeBag">Close</button></h2>
+  <div id="lines"></div>
+  <div class="foot">
+    <div class="tot"><span>Subtotal</span><span id="sub">₹0</span></div>
+    <div class="tot"><span>Shipping</span><span id="ship">₹0</span></div>
+    <div class="tot big"><span>Total</span><span id="total">₹0</span></div>
+    <input id="email" type="email" placeholder="Email (optional)" maxlength="120">
+    <button class="go" id="checkout" disabled>Place order</button>
+    <div class="msg" id="msg"></div>
+  </div>
+</aside>
+<script>
+const COLOURS={Audio:"#7c5cff",Wearables:"#00b894",Accessories:"#e17055",Gadgets:"#0984e3"};
+const FREE_FROM=4000, SHIPPING=99;
+let products=[], category="All", bag={};
+const $=id=>document.getElementById(id);
+const inr=n=>"₹"+Number(n).toLocaleString("en-IN");
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e}
+async function load(){
+  try{
+    const r=await fetch("/api/products");
+    if(!r.ok) throw new Error("bad status");
+    products=await r.json();
+    $("status").style.display="none";
+    chips();render();
+  }catch(e){$("status").textContent="Could not load products. Please refresh."}
+}
+function chips(){
+  const box=$("chips");box.textContent="";
+  ["All",...new Set(products.map(p=>p.category))].forEach(c=>{
+    const b=el("button","chip"+(c===category?" on":""),c);
+    b.onclick=()=>{category=c;chips();render()};box.appendChild(b);
+  });
+}
+function render(){
+  const g=$("grid");g.textContent="";
+  products.filter(p=>category==="All"||p.category===category).forEach(p=>{
+    const card=el("div","card"), pic=el("div","pic");
+    if(p.image_url){const i=document.createElement("img");i.src=p.image_url;i.alt=p.name;pic.appendChild(i)}
+    else{pic.style.background=COLOURS[p.category]||"#444";pic.textContent=p.name[0]}
+    const info=el("div","info");
+    info.append(el("div","cat",p.category),el("div","name",p.name),el("div","desc",p.description));
+    const row=el("div","row"),add=el("button","add","Add");
+    add.onclick=()=>{bag[p.product_id]=Math.min(10,(bag[p.product_id]||0)+1);drawBag();$("drawer").classList.add("open")};
+    row.append(el("div","price",inr(p.price_inr)),add);info.appendChild(row);
+    card.append(pic,info);g.appendChild(card);
+  });
+}
+function totals(){
+  let sub=0;
+  for(const [id,q] of Object.entries(bag)){const p=products.find(x=>x.product_id===id);if(p)sub+=p.price_inr*q}
+  const ship=sub===0?0:(sub>=FREE_FROM?0:SHIPPING);
+  return {sub,ship,total:sub+ship};
+}
+function drawBag(){
+  const box=$("lines");box.textContent="";
+  let n=0;
+  for(const [id,q] of Object.entries(bag)){
+    const p=products.find(x=>x.product_id===id);if(!p)continue;n+=q;
+    const line=el("div","line"),left=el("div","",p.name+" · "+inr(p.price_inr));
+    const qty=el("div","qty"),minus=el("button","","−"),plus=el("button","","+");
+    minus.onclick=()=>{bag[id]--;if(bag[id]<=0)delete bag[id];drawBag()};
+    plus.onclick=()=>{bag[id]=Math.min(10,bag[id]+1);drawBag()};
+    qty.append(minus,document.createTextNode(" "+q+" "),plus);line.append(left,qty);box.appendChild(line);
+  }
+  const t=totals();
+  $("count").textContent=n;$("sub").textContent=inr(t.sub);
+  $("ship").textContent=t.ship?inr(t.ship):"Free";$("total").textContent=inr(t.total);
+  $("checkout").disabled=n===0;
+}
+async function checkout(){
+  const msg=$("msg"),btn=$("checkout");
+  msg.className="msg";msg.textContent="Placing your order…";btn.disabled=true;
+  const body={items:Object.entries(bag).map(([product_id,qty])=>({product_id,qty}))};
+  const email=$("email").value.trim();if(email)body.customer_email=email;
+  try{
+    const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok){msg.className="msg bad";msg.textContent=d.error||"Something went wrong";btn.disabled=false;return}
+    msg.className="msg ok";msg.textContent="Order placed! Ref "+d.order_id.slice(0,8)+" · Total "+inr(d.total_inr);
+    bag={};drawBag();btn.disabled=true;
+  }catch(e){msg.className="msg bad";msg.textContent="Network problem, please try again";btn.disabled=false}
+}
+$("bagBtn").onclick=()=>$("drawer").classList.add("open");
+$("closeBag").onclick=()=>$("drawer").classList.remove("open");
+$("checkout").onclick=checkout;
+load();drawBag();
+</script>
+</body>
+</html>

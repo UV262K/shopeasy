@@ -21,11 +21,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
+      - name: Sync Lambda source into CloudFormation
+        run: python scripts/sync_lambda.py
+      - name: Lint CloudFormation template
+        run: cfn-lint -i W -t infra/network-ecs.yaml
       - name: Run tests
         run: pytest
       - name: Build Docker image
-        run: docker build -t shopeasy:${{ github.sha }} .
+        run: docker build -f dockerfile -t shopeasy:${{ github.sha }} .
 
   deploy:
     name: CD - push to ECR and deploy to ECS
@@ -34,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Sync Lambda source into CloudFormation
+        run: python scripts/sync_lambda.py
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -47,7 +53,7 @@ jobs:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           TAG: ${{ github.sha }}
         run: |
-          docker build -t $REGISTRY/$ECR_REPO:$TAG .
+          docker build -f dockerfile -t $REGISTRY/$ECR_REPO:$TAG .
           docker push $REGISTRY/$ECR_REPO:$TAG
       - name: Register new task definition revision
         id: taskdef

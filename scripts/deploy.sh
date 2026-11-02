@@ -14,25 +14,36 @@ TEMPLATE="infra/network-ecs.yaml"
 echo ">> 1. Validate template"
 aws cloudformation validate-template --template-body "file://$TEMPLATE" --region "$REGION" >/dev/null
 
-echo ">> 2. Create infrastructure (0 tasks, so the stack does not wait for an image)"
+echo ">> 2. Create/update infrastructure with service initially at zero tasks"
 aws cloudformation deploy --stack-name "$STACK" --template-file "$TEMPLATE" \
   --region "$REGION" --capabilities CAPABILITY_IAM \
   --parameter-overrides AlertEmail="$EMAIL" ImageTag="$TAG" DesiredCount=0
 
-echo ">> 3. Build and push container image"
+out() { aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+
+echo ">> 3. Seed DynamoDB products and S3 images"
+python3 -m pip install -q boto3
+PRODUCTS_TABLE="$(out ProductsTableName)" DATA_BUCKET="$(out DataBucketName)" AWS_REGION="$REGION" \
+  python3 scripts/seed_products.py
+
+echo ">> 4. Sync Lambda code, build and push container image"
+python3 scripts/sync_lambda.py
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
-docker build -t "$REPO:$TAG" .
+docker build -f dockerfile -t "$REPO:$TAG" .
 docker push "$REPO:$TAG"
 
-echo ">> 4. Scale up: run 2 tasks"
+echo ">> 5. Scale service to two tasks"
 aws cloudformation deploy --stack-name "$STACK" --template-file "$TEMPLATE" \
   --region "$REGION" --capabilities CAPABILITY_IAM \
   --parameter-overrides AlertEmail="$EMAIL" ImageTag="$TAG" DesiredCount=2
 
-echo ">> 5. Wait for service to stabilise"
+echo ">> 6. Wait for service to stabilise"
 aws ecs wait services-stable --cluster shopeasy-cluster --services shopeasy-service --region "$REGION"
 
-URL=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
-  --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" --output text)
+URL=$(out AppUrl)
 echo ">> DONE. App URL: $URL"
-curl -s "$URL/health"; echo
+curl -fsS "$URL/health"; echo
+echo ">> Products from DynamoDB:"
+curl -fsS "$URL/api/products" | head -c 300; echo
+echo ">> Next: ./scripts/demo-order.sh to place a test order and watch Lambda, S3 and CloudWatch react"
