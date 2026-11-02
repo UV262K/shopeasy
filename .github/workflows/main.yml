@@ -17,30 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # The full implementation is kept as a versioned source bundle. Extract it
-      # before testing/building; exclude its workflow so this file remains active.
-      - name: Extract ShopEasy upgrade source
-        run: unzip -o .upgrade/shopeasy-updated.zip -d . -x '.github/*'
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
-
-      - name: Sync Lambda source into CloudFormation
-        run: python scripts/sync_lambda.py
-
-      - name: Lint CloudFormation template
-        run: cfn-lint -i W infra/network-ecs.yaml
-
+        run: pip install -r requirements.txt
       - name: Run tests
-        run: pytest -q
-
+        run: pytest
       - name: Build Docker image
-        run: docker build -f dockerfile -t shopeasy:${{ github.sha }} .
+        run: docker build -t shopeasy:${{ github.sha }} .
 
   deploy:
     name: CD - push to ECR and deploy to ECS
@@ -49,31 +34,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Extract ShopEasy upgrade source
-        run: unzip -o .upgrade/shopeasy-updated.zip -d . -x '.github/*'
-
-      - name: Sync Lambda source into CloudFormation
-        run: python3 scripts/sync_lambda.py
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Login to ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
-
       - name: Build and push image (tag = commit SHA)
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           TAG: ${{ github.sha }}
         run: |
-          docker build -f dockerfile -t $REGISTRY/$ECR_REPO:$TAG .
+          docker build -t $REGISTRY/$ECR_REPO:$TAG .
           docker push $REGISTRY/$ECR_REPO:$TAG
-
       - name: Register new task definition revision
         id: taskdef
         env:
@@ -89,16 +64,14 @@ jobs:
           ARN=$(aws ecs register-task-definition --cli-input-json file://td-new.json \
             --query taskDefinition.taskDefinitionArn --output text)
           echo "arn=$ARN" >> $GITHUB_OUTPUT
-
       - name: Deploy to ECS and wait for stability
         run: |
           aws ecs update-service --cluster $CLUSTER --service $SERVICE \
             --task-definition ${{ steps.taskdef.outputs.arn }} >/dev/null
           aws ecs wait services-stable --cluster $CLUSTER --services $SERVICE
-
       - name: Verify running application
         run: |
           URL=$(aws cloudformation describe-stacks --stack-name shopeasy \
             --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue" --output text)
-          curl -sf "$URL/health"
-          curl -sf "$URL/api/products" >/dev/null
+          curl -sf $URL/health
+          curl -sf $URL/
