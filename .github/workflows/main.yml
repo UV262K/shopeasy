@@ -22,6 +22,10 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
+      - name: Sync Lambda source into CloudFormation
+        run: python scripts/sync_lambda.py
+      - name: Lint CloudFormation template
+        run: cfn-lint -i W infra/network-ecs.yaml
       - name: Run tests
         run: pytest
       - name: Build Docker image
@@ -34,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Sync Lambda source into CloudFormation
+        run: python scripts/sync_lambda.py
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
